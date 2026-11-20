@@ -25,6 +25,7 @@ using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE *)(
 
 static scs_log_t g_log = nullptr;
 static std::atomic<float> g_vignetteIntensity{0.0f};
+static std::atomic<float> g_blurAmount{0.0f};
 
 static PresentFn g_originalPresent = nullptr;
 static ResizeBuffersFn g_originalResizeBuffers = nullptr;
@@ -181,7 +182,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(
   InspectSwapChain(swapChain);
   Renderer_Render(
       swapChain,
-      g_vignetteIntensity.load(std::memory_order_relaxed));
+      g_vignetteIntensity.load(std::memory_order_relaxed),
+      g_blurAmount.load(std::memory_order_relaxed));
 
   return g_originalPresent(
       swapChain,
@@ -494,5 +496,14 @@ void DX11Hook_SetVignetteIntensity(float intensity)
 
   g_vignetteIntensity.store(
       intensity,
+      std::memory_order_relaxed);
+}
+
+void DX11Hook_SetBlurAmount(float amount)
+{
+  amount = std::clamp(amount, 0.0f, 1.0f);
+
+  g_blurAmount.store(
+      amount,
       std::memory_order_relaxed);
 }

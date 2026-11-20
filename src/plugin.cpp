@@ -1,4 +1,7 @@
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <cstdio>
 #include <cmath>
@@ -30,6 +33,7 @@ static constexpr DWORD TELEMETRY_INTERVAL = 5000;
 static constexpr DWORD WORKER_INTERVAL = 50;
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
+static constexpr ULONGLONG VIGNETTE_FADE_DURATION = 600;
 
 static constexpr float PERMANENT_VIGNETTE_THRESHOLD = 10.0f;
 static constexpr float BLUR_THRESHOLD = 5.0f;
@@ -59,8 +63,6 @@ static bool g_triggered60_41[2] = {};
 static bool g_triggered40_26[4] = {};
 static bool g_triggered25_11[10] = {};
 
-static int g_pendingPulses = 0;
-
 static bool g_pulseActive = false;
 static ULONGLONG g_pulseEndTime = 0;
 
@@ -89,8 +91,6 @@ static void ResetTriggerState()
         std::end(g_triggered25_11),
         false);
 
-    g_pendingPulses = 0;
-
     g_pulseActive = false;
     g_pulseEndTime = 0;
 
@@ -116,9 +116,10 @@ static void CheckThresholds(
         {
             triggered[i] = true;
 
-            // Antrean trigger bersama.
-            if (g_pendingPulses < 100)
-                g_pendingPulses++;
+            // Langsung mulai satu pulse pada sampel ini.
+            // Jika beberapa threshold terlewati sekaligus, pulse tidak diantrekan.
+            g_pulseActive = true;
+            g_pulseEndTime = GetTickCount64() + VIGNETTE_DURATION;
 
             if (g_log)
             {
@@ -211,8 +212,7 @@ static void ProcessNeedValue(float current)
 
     if (g_permanentVignette)
     {
-        // Tidak perlu antrean pulse ketika vignette permanen.
-        g_pendingPulses = 0;
+        // Vignette permanen menggantikan pulse sementara.
         g_pulseActive = false;
     }
 }
@@ -224,6 +224,14 @@ static void ProcessNeedValue(float current)
 static void UpdateVignette()
 {
     const ULONGLONG now = GetTickCount64();
+    static float visualIntensity = 0.0f;
+    static float visualBlurAmount = 0.0f;
+    static ULONGLONG lastUpdateTime = 0;
+
+    const ULONGLONG elapsed = lastUpdateTime == 0
+                                  ? WORKER_INTERVAL
+                                  : now - lastUpdateTime;
+    lastUpdateTime = now;
 
     float intensity = 0.0f;
 
@@ -239,22 +247,29 @@ static void UpdateVignette()
             g_pulseActive = false;
         }
 
-        // Jalankan trigger berikutnya jika tersedia.
-        if (!g_pulseActive && g_pendingPulses > 0)
-        {
-            g_pendingPulses--;
-
-            g_pulseActive = true;
-            g_pulseEndTime = now + VIGNETTE_DURATION;
-        }
-
         if (g_pulseActive)
             intensity = 1.0f;
     }
 
-    g_vignetteTarget.store(intensity);
+    // Ramp smoothly toward the desired intensity. Using elapsed wall time
+    // keeps the fade duration stable if worker scheduling varies slightly.
+    const float maxStep = static_cast<float>(elapsed) /
+                          static_cast<float>(VIGNETTE_FADE_DURATION);
+    if (visualIntensity < intensity)
+        visualIntensity = std::min(intensity, visualIntensity + maxStep);
+    else if (visualIntensity > intensity)
+        visualIntensity = std::max(intensity, visualIntensity - maxStep);
 
-    DX11Hook_SetVignetteIntensity(intensity);
+    const float blurTarget = g_blurRequired ? 1.0f : 0.0f;
+    if (visualBlurAmount < blurTarget)
+        visualBlurAmount = std::min(blurTarget, visualBlurAmount + maxStep);
+    else if (visualBlurAmount > blurTarget)
+        visualBlurAmount = std::max(blurTarget, visualBlurAmount - maxStep);
+
+    g_vignetteTarget.store(visualIntensity);
+
+    DX11Hook_SetVignetteIntensity(visualIntensity);
+    DX11Hook_SetBlurAmount(visualBlurAmount);
 }
 
 // ============================================================
@@ -368,6 +383,7 @@ static DWORD WINAPI Worker(LPVOID)
             stableCount = 0;
 
             ResetTriggerState();
+            UpdateVignette();
 
             WaitForSingleObject(
                 g_stopEvent,
@@ -435,11 +451,10 @@ static DWORD WINAPI Worker(LPVOID)
                         snprintf(
                             buf,
                             sizeof(buf),
-                            "DRXexpandTM: hunger=%.1f thirst=%.1f effective=%.1f pending=%d permanent=%d blur=%d",
+                            "DRXexpandTM: hunger=%.1f thirst=%.1f effective=%.1f permanent=%d blur=%d",
                             n.lapar,
                             n.haus,
                             effectiveNeed,
-                            g_pendingPulses,
                             g_permanentVignette ? 1 : 0,
                             g_blurRequired ? 1 : 0);
 
@@ -451,13 +466,7 @@ static DWORD WINAPI Worker(LPVOID)
 
         // Update efek setiap 50ms, bukan setiap 5 detik.
         // Ini menjaga durasi pulse tetap akurat.
-        if (ready)
-            UpdateVignette();
-        else
-        {
-            g_vignetteTarget.store(0.0f);
-            DX11Hook_SetVignetteIntensity(0.0f);
-        }
+        UpdateVignette();
 
         if (WaitForSingleObject(
                 g_stopEvent,
@@ -483,7 +492,6 @@ static void SCSAPIFUNC OnPaused(
     g_resetRequested.store(true);
 
     g_vignetteTarget.store(0.0f);
-    DX11Hook_SetVignetteIntensity(0.0f);
 
     if (g_log)
         g_log(

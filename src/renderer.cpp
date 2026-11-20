@@ -428,7 +428,8 @@ static bool CreateResources(IDXGISwapChain *swapChain)
 
 void Renderer_Render(
     IDXGISwapChain *swapChain,
-    float intensity)
+    float intensity,
+    float blurAmount)
 {
   if (!swapChain)
     return;
@@ -440,8 +441,11 @@ void Renderer_Render(
   intensity = (intensity < 0.0f)
                   ? 0.0f
                   : (intensity > 1.0f ? 1.0f : intensity);
+  blurAmount = (blurAmount < 0.0f)
+                   ? 0.0f
+                   : (blurAmount > 1.0f ? 1.0f : blurAmount);
 
-  if (intensity <= 0.001f)
+  if (intensity <= 0.001f && blurAmount <= 0.001f)
     return;
 
   std::lock_guard<std::mutex> lock(g_rendererMutex);
@@ -515,7 +519,7 @@ void Renderer_Render(
     float intensity;
     float strength;
     float aspectRatio;
-    float padding;
+    float blurAmount;
   };
 
   EffectParams params{};
@@ -525,6 +529,7 @@ void Renderer_Render(
   params.aspectRatio =
       static_cast<float>(g_renderer.width) /
       static_cast<float>(g_renderer.height);
+  params.blurAmount = blurAmount;
 
   deferred->UpdateSubresource(
       g_renderer.constantBuffer,
