@@ -8,6 +8,8 @@ void Renderer_SetLogger(scs_log_t log);
 void Renderer_Render(
     IDXGISwapChain *swapChain,
     float intensity,
-    float blurAmount);
+    float blurAmount,
+    float shakeAmount,
+    float shakePhase);
 
 void Renderer_Release();

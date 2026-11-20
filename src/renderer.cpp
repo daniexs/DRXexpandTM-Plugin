@@ -364,10 +364,10 @@ static bool CreateResources(IDXGISwapChain *swapChain)
     if (FAILED(hr))
       break;
 
-    // Constant buffer: 16 bytes.
+    // Constant buffer: 32 bytes (two 16-byte registers).
     D3D11_BUFFER_DESC cbDesc{};
 
-    cbDesc.ByteWidth = 16;
+    cbDesc.ByteWidth = 32;
     cbDesc.Usage = D3D11_USAGE_DEFAULT;
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
@@ -429,7 +429,9 @@ static bool CreateResources(IDXGISwapChain *swapChain)
 void Renderer_Render(
     IDXGISwapChain *swapChain,
     float intensity,
-    float blurAmount)
+    float blurAmount,
+    float shakeAmount,
+    float shakePhase)
 {
   if (!swapChain)
     return;
@@ -444,8 +446,11 @@ void Renderer_Render(
   blurAmount = (blurAmount < 0.0f)
                    ? 0.0f
                    : (blurAmount > 1.0f ? 1.0f : blurAmount);
+  shakeAmount = (shakeAmount < 0.0f)
+                    ? 0.0f
+                    : (shakeAmount > 1.0f ? 1.0f : shakeAmount);
 
-  if (intensity <= 0.001f && blurAmount <= 0.001f)
+  if (intensity <= 0.001f && blurAmount <= 0.001f && shakeAmount <= 0.001f)
     return;
 
   std::lock_guard<std::mutex> lock(g_rendererMutex);
@@ -520,6 +525,10 @@ void Renderer_Render(
     float strength;
     float aspectRatio;
     float blurAmount;
+    float shakeAmount;
+    float shakePhase;
+    float padding0;
+    float padding1;
   };
 
   EffectParams params{};
@@ -530,6 +539,8 @@ void Renderer_Render(
       static_cast<float>(g_renderer.width) /
       static_cast<float>(g_renderer.height);
   params.blurAmount = blurAmount;
+  params.shakeAmount = shakeAmount;
+  params.shakePhase = shakePhase;
 
   deferred->UpdateSubresource(
       g_renderer.constantBuffer,

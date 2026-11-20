@@ -34,6 +34,9 @@ static constexpr DWORD WORKER_INTERVAL = 50;
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
 static constexpr ULONGLONG VIGNETTE_FADE_DURATION = 600;
+static constexpr ULONGLONG TOILET_SHAKE_DURATION = 400;
+static constexpr ULONGLONG TOILET_SHAKE_GAP = 120;
+static constexpr ULONGLONG TOILET_CRITICAL_INTERVAL = 5000;
 
 static constexpr float PERMANENT_VIGNETTE_THRESHOLD = 10.0f;
 static constexpr float BLUR_THRESHOLD = 5.0f;
@@ -50,6 +53,12 @@ static constexpr float THRESHOLDS_40_26[] = {
 static constexpr float THRESHOLDS_25_11[] = {
     24.0f, 23.0f, 21.0f, 20.0f, 18.0f,
     17.0f, 15.0f, 14.0f, 12.0f, 11.0f};
+
+// Trigger shake toilet dibagi sesuai jumlah pulse per rentang.
+static constexpr float TOILET_THRESHOLDS_50_40[] = {47.0f, 43.0f};
+static constexpr float TOILET_THRESHOLDS_40_20[] = {36.0f, 32.0f, 28.0f, 24.0f};
+static constexpr float TOILET_THRESHOLDS_20_10[] = {18.0f, 16.0f, 14.0f, 12.0f, 10.0f};
+static constexpr float TOILET_THRESHOLDS_10_5[] = {9.0f, 8.0f, 7.0f, 6.0f, 5.0f};
 
 // ============================================================
 // STATE MACHINE
@@ -68,6 +77,19 @@ static ULONGLONG g_pulseEndTime = 0;
 
 static bool g_permanentVignette = false;
 static bool g_blurRequired = false;
+
+static bool g_toiletBaselineReady = false;
+static float g_previousToilet = 100.0f;
+static bool g_toiletTriggered50_40[2] = {};
+static bool g_toiletTriggered40_20[4] = {};
+static bool g_toiletTriggered20_10[5] = {};
+static bool g_toiletTriggered10_5[5] = {};
+static int g_pendingShakePulses = 0;
+static bool g_shakePulseActive = false;
+static ULONGLONG g_shakePulseEndTime = 0;
+static ULONGLONG g_nextShakeTime = 0;
+static bool g_toiletCritical = false;
+static ULONGLONG g_nextCriticalShakeTime = 0;
 
 // Reset seluruh state ketika game pause / telemetry tidak tersedia.
 static void ResetTriggerState()
@@ -97,7 +119,118 @@ static void ResetTriggerState()
     g_permanentVignette = false;
     g_blurRequired = false;
 
+    g_toiletBaselineReady = false;
+    g_previousToilet = 100.0f;
+    std::fill(std::begin(g_toiletTriggered50_40), std::end(g_toiletTriggered50_40), false);
+    std::fill(std::begin(g_toiletTriggered40_20), std::end(g_toiletTriggered40_20), false);
+    std::fill(std::begin(g_toiletTriggered20_10), std::end(g_toiletTriggered20_10), false);
+    std::fill(std::begin(g_toiletTriggered10_5), std::end(g_toiletTriggered10_5), false);
+    g_pendingShakePulses = 0;
+    g_shakePulseActive = false;
+    g_shakePulseEndTime = 0;
+    g_nextShakeTime = 0;
+    g_toiletCritical = false;
+    g_nextCriticalShakeTime = 0;
+
     g_vignetteTarget.store(0.0f);
+}
+
+template <size_t N>
+static void CheckToiletThresholds(
+    float previous,
+    float current,
+    const float (&thresholds)[N],
+    bool (&triggered)[N])
+{
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (!triggered[i] && previous > thresholds[i] && current <= thresholds[i])
+        {
+            triggered[i] = true;
+            if (g_pendingShakePulses < 64)
+                ++g_pendingShakePulses;
+        }
+    }
+}
+
+static void ProcessToiletValue(float current)
+{
+    if (current > 50.0f)
+        std::fill(std::begin(g_toiletTriggered50_40), std::end(g_toiletTriggered50_40), false);
+    if (current > 40.0f)
+        std::fill(std::begin(g_toiletTriggered40_20), std::end(g_toiletTriggered40_20), false);
+    if (current > 20.0f)
+        std::fill(std::begin(g_toiletTriggered20_10), std::end(g_toiletTriggered20_10), false);
+    if (current > 10.0f)
+        std::fill(std::begin(g_toiletTriggered10_5), std::end(g_toiletTriggered10_5), false);
+
+    if (!g_toiletBaselineReady)
+    {
+        g_previousToilet = current;
+        g_toiletBaselineReady = true;
+    }
+    else
+    {
+        if (current < g_previousToilet)
+        {
+            CheckToiletThresholds(g_previousToilet, current, TOILET_THRESHOLDS_50_40, g_toiletTriggered50_40);
+            CheckToiletThresholds(g_previousToilet, current, TOILET_THRESHOLDS_40_20, g_toiletTriggered40_20);
+            CheckToiletThresholds(g_previousToilet, current, TOILET_THRESHOLDS_20_10, g_toiletTriggered20_10);
+            CheckToiletThresholds(g_previousToilet, current, TOILET_THRESHOLDS_10_5, g_toiletTriggered10_5);
+        }
+        g_previousToilet = current;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (current < 5.0f)
+    {
+        if (!g_toiletCritical)
+            g_nextCriticalShakeTime = now + TOILET_CRITICAL_INTERVAL;
+        g_toiletCritical = true;
+    }
+    else
+    {
+        g_toiletCritical = false;
+        g_nextCriticalShakeTime = 0;
+    }
+}
+
+static void UpdateToiletShake()
+{
+    const ULONGLONG now = GetTickCount64();
+
+    if (g_toiletCritical && now >= g_nextCriticalShakeTime)
+    {
+        if (g_pendingShakePulses < 64)
+            ++g_pendingShakePulses;
+        g_nextCriticalShakeTime = now + TOILET_CRITICAL_INTERVAL;
+    }
+
+    if (g_shakePulseActive && now >= g_shakePulseEndTime)
+    {
+        g_shakePulseActive = false;
+        g_nextShakeTime = now + TOILET_SHAKE_GAP;
+    }
+
+    if (!g_shakePulseActive && g_pendingShakePulses > 0 && now >= g_nextShakeTime)
+    {
+        --g_pendingShakePulses;
+        g_shakePulseActive = true;
+        g_shakePulseEndTime = now + TOILET_SHAKE_DURATION;
+    }
+
+    float amount = 0.0f;
+    float phase = 0.0f;
+    if (g_shakePulseActive)
+    {
+        const ULONGLONG elapsed = TOILET_SHAKE_DURATION - (g_shakePulseEndTime - now);
+        const float progress = static_cast<float>(elapsed) / static_cast<float>(TOILET_SHAKE_DURATION);
+        const float fade = std::min(1.0f, std::min(progress * 5.0f, (1.0f - progress) * 5.0f));
+        amount = std::max(0.0f, fade);
+        phase = static_cast<float>(now) / 1000.0f;
+    }
+
+    DX11Hook_SetScreenShake(amount, phase);
 }
 
 // Memeriksa threshold yang dilewati ketika nilai menurun.
@@ -384,6 +517,7 @@ static DWORD WINAPI Worker(LPVOID)
 
             ResetTriggerState();
             UpdateVignette();
+            UpdateToiletShake();
 
             WaitForSingleObject(
                 g_stopEvent,
@@ -443,6 +577,7 @@ static DWORD WINAPI Worker(LPVOID)
                         std::min(n.lapar, n.haus);
 
                     ProcessNeedValue(effectiveNeed);
+                    ProcessToiletValue(n.toilet);
 
                     if (g_log)
                     {
@@ -467,6 +602,7 @@ static DWORD WINAPI Worker(LPVOID)
         // Update efek setiap 50ms, bukan setiap 5 detik.
         // Ini menjaga durasi pulse tetap akurat.
         UpdateVignette();
+        UpdateToiletShake();
 
         if (WaitForSingleObject(
                 g_stopEvent,
