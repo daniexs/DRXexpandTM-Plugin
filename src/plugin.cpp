@@ -17,6 +17,7 @@ static HANDLE g_stopEvent = nullptr;
 static std::atomic_bool g_run{false};
 static std::atomic_bool g_paused{true};
 static std::atomic_bool g_resetRequested{false};
+static std::atomic_bool g_healthWriteFailedLogged{false};
 
 static std::atomic<float> g_vignetteTarget{0.0f};
 
@@ -476,6 +477,38 @@ static bool LooksInitialized(const DriverNeeds &n)
            InRange(n.toilet);
 }
 
+static void ApplyHealthDrain(float drainPerSecond, float elapsedSeconds)
+{
+    if (drainPerSecond <= 0.0f || elapsedSeconds <= 0.0f)
+        return;
+
+    HMODULE mod = GetModuleHandleA("TMRealWalk.dll");
+    if (!mod)
+        return;
+
+    volatile float *health = reinterpret_cast<volatile float *>(
+        reinterpret_cast<BYTE *>(mod) + 0x7B270C);
+
+    __try
+    {
+        const float currentHealth = *health;
+        if (std::isfinite(currentHealth) &&
+            currentHealth > 0.0f &&
+            currentHealth <= 100.0f)
+        {
+            const float nextHealth = std::max(
+                0.0f,
+                currentHealth - drainPerSecond * elapsedSeconds);
+            *health = nextHealth;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        if (g_log && !g_healthWriteFailedLogged.exchange(true))
+            g_log(SCS_LOG_TYPE_error, "DRXexpandTM: HEALTH WRITE FAILED");
+    }
+}
+
 // ============================================================
 // WORKER
 // ============================================================
@@ -491,6 +524,9 @@ static DWORD WINAPI Worker(LPVOID)
     bool ready = false;
 
     ULONGLONG nextTelemetryRead = 0;
+    ULONGLONG lastHealthDrainTime = 0;
+    float hungerForDrain = 100.0f;
+    float thirstForDrain = 100.0f;
 
     while (g_run.load())
     {
@@ -502,6 +538,9 @@ static DWORD WINAPI Worker(LPVOID)
             stableCount = 0;
             ready = false;
             nextTelemetryRead = 0;
+            lastHealthDrainTime = 0;
+            hungerForDrain = 100.0f;
+            thirstForDrain = 100.0f;
         }
 
         // Jangan memproses kebutuhan ketika game pause.
@@ -514,6 +553,7 @@ static DWORD WINAPI Worker(LPVOID)
 
             ready = false;
             stableCount = 0;
+            lastHealthDrainTime = 0;
 
             ResetTriggerState();
             UpdateVignette();
@@ -549,6 +589,7 @@ static DWORD WINAPI Worker(LPVOID)
 
                 ready = false;
                 stableCount = 0;
+                lastHealthDrainTime = 0;
 
                 ResetTriggerState();
             }
@@ -571,6 +612,9 @@ static DWORD WINAPI Worker(LPVOID)
 
                 if (ready)
                 {
+                    hungerForDrain = n.lapar;
+                    thirstForDrain = n.haus;
+
                     // Satu pengendali untuk hunger dan thirst.
                     // Nilai terendah menjadi prioritas.
                     float effectiveNeed =
@@ -603,6 +647,29 @@ static DWORD WINAPI Worker(LPVOID)
         // Ini menjaga durasi pulse tetap akurat.
         UpdateVignette();
         UpdateToiletShake();
+
+        if (ready)
+        {
+            const ULONGLONG nowForDrain = GetTickCount64();
+            if (lastHealthDrainTime == 0)
+            {
+                lastHealthDrainTime = nowForDrain;
+            }
+            else
+            {
+                const float elapsedSeconds = static_cast<float>(
+                    nowForDrain - lastHealthDrainTime) / 1000.0f;
+                lastHealthDrainTime = nowForDrain;
+
+                float drainPerSecond = 0.0f;
+                if (hungerForDrain <= 0.0f)
+                    drainPerSecond += 0.5f;
+                if (thirstForDrain <= 0.0f)
+                    drainPerSecond += 1.0f;
+
+                ApplyHealthDrain(drainPerSecond, elapsedSeconds);
+            }
+        }
 
         if (WaitForSingleObject(
                 g_stopEvent,
