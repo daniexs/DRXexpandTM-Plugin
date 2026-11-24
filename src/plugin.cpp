@@ -23,7 +23,7 @@ static std::atomic<float> g_vignetteTarget{0.0f};
 
 struct DriverNeeds
 {
-    float lapar, haus, health, toilet;
+    float rest, lapar, haus, health, toilet;
 };
 
 // ============================================================
@@ -32,6 +32,7 @@ struct DriverNeeds
 
 static constexpr DWORD TELEMETRY_INTERVAL = 5000;
 static constexpr DWORD WORKER_INTERVAL = 50;
+static constexpr ULONGLONG REST_RECOVERY_DRAIN_DELAY = 10000;
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
 static constexpr ULONGLONG VIGNETTE_FADE_DURATION = 600;
@@ -426,7 +427,7 @@ static bool ReadNeeds(DriverNeeds &out)
 
     const DriverNeeds *p =
         reinterpret_cast<const DriverNeeds *>(
-            (BYTE *)mod + 0x7B2704);
+            (BYTE *)mod + 0x7B2700);
 
     __try
     {
@@ -449,7 +450,8 @@ static bool ReadNeeds(DriverNeeds &out)
         snprintf(
             buf,
             sizeof(buf),
-            "DRXexpandTM RAW: %.2f %.2f %.2f %.2f",
+            "DRXexpandTM RAW: rest=%.2f hunger=%.2f thirst=%.2f health=%.2f toilet=%.2f",
+            out.rest,
             out.lapar,
             out.haus,
             out.health,
@@ -458,7 +460,8 @@ static bool ReadNeeds(DriverNeeds &out)
         g_log(SCS_LOG_TYPE_message, buf);
     }
 
-    return std::isfinite(out.lapar) &&
+    return std::isfinite(out.rest) &&
+           std::isfinite(out.lapar) &&
            std::isfinite(out.haus) &&
            std::isfinite(out.health) &&
            std::isfinite(out.toilet);
@@ -471,7 +474,8 @@ static bool InRange(float v)
 
 static bool LooksInitialized(const DriverNeeds &n)
 {
-    return InRange(n.lapar) &&
+    return InRange(n.rest) &&
+           InRange(n.lapar) &&
            InRange(n.haus) &&
            InRange(n.health) &&
            InRange(n.toilet);
@@ -525,6 +529,9 @@ static DWORD WINAPI Worker(LPVOID)
 
     ULONGLONG nextTelemetryRead = 0;
     ULONGLONG lastHealthDrainTime = 0;
+    ULONGLONG healthDrainResumeTime = 0;
+    bool restBaselineReady = false;
+    float previousRest = 0.0f;
     float hungerForDrain = 100.0f;
     float thirstForDrain = 100.0f;
 
@@ -539,6 +546,8 @@ static DWORD WINAPI Worker(LPVOID)
             ready = false;
             nextTelemetryRead = 0;
             lastHealthDrainTime = 0;
+            healthDrainResumeTime = 0;
+            restBaselineReady = false;
             hungerForDrain = 100.0f;
             thirstForDrain = 100.0f;
         }
@@ -554,6 +563,8 @@ static DWORD WINAPI Worker(LPVOID)
             ready = false;
             stableCount = 0;
             lastHealthDrainTime = 0;
+            healthDrainResumeTime = 0;
+            restBaselineReady = false;
 
             ResetTriggerState();
             UpdateVignette();
@@ -590,6 +601,8 @@ static DWORD WINAPI Worker(LPVOID)
                 ready = false;
                 stableCount = 0;
                 lastHealthDrainTime = 0;
+                healthDrainResumeTime = 0;
+                restBaselineReady = false;
 
                 ResetTriggerState();
             }
@@ -612,6 +625,27 @@ static DWORD WINAPI Worker(LPVOID)
 
                 if (ready)
                 {
+                    const ULONGLONG restSampleTime = GetTickCount64();
+                    if (!restBaselineReady)
+                    {
+                        previousRest = n.rest;
+                        restBaselineReady = true;
+                    }
+                    else if ((n.lapar <= 0.0f || n.haus <= 0.0f) &&
+                             n.rest > previousRest + 4.0f &&
+                             restSampleTime >= healthDrainResumeTime)
+                    {
+                        healthDrainResumeTime =
+                            restSampleTime + REST_RECOVERY_DRAIN_DELAY;
+                        lastHealthDrainTime = 0;
+
+                        if (g_log)
+                            g_log(
+                                SCS_LOG_TYPE_message,
+                                "DRXexpandTM: REST RECOVERY - HEALTH DRAIN DELAYED 10 SECONDS");
+                    }
+                    previousRest = n.rest;
+
                     hungerForDrain = n.lapar;
                     thirstForDrain = n.haus;
 
@@ -651,7 +685,12 @@ static DWORD WINAPI Worker(LPVOID)
         if (ready)
         {
             const ULONGLONG nowForDrain = GetTickCount64();
-            if (lastHealthDrainTime == 0)
+            if (nowForDrain < healthDrainResumeTime)
+            {
+                // Do not accumulate drain time during the post-rest grace period.
+                lastHealthDrainTime = nowForDrain;
+            }
+            else if (lastHealthDrainTime == 0)
             {
                 lastHealthDrainTime = nowForDrain;
             }
