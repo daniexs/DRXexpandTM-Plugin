@@ -28,6 +28,7 @@ static std::atomic<float> g_vignetteIntensity{0.0f};
 static std::atomic<float> g_blurAmount{0.0f};
 static std::atomic<float> g_shakeAmount{0.0f};
 static std::atomic<float> g_shakePhase{0.0f};
+static std::atomic<float> g_showerValue{100.0f};
 
 static PresentFn g_originalPresent = nullptr;
 static ResizeBuffersFn g_originalResizeBuffers = nullptr;
@@ -187,7 +188,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(
       g_vignetteIntensity.load(std::memory_order_relaxed),
       g_blurAmount.load(std::memory_order_relaxed),
       g_shakeAmount.load(std::memory_order_relaxed),
-      g_shakePhase.load(std::memory_order_relaxed));
+      g_shakePhase.load(std::memory_order_relaxed),
+      g_showerValue.load(std::memory_order_relaxed));
 
   return g_originalPresent(
       swapChain,
@@ -517,4 +519,10 @@ void DX11Hook_SetScreenShake(float amount, float phase)
   amount = std::clamp(amount, 0.0f, 1.0f);
   g_shakeAmount.store(amount, std::memory_order_relaxed);
   g_shakePhase.store(phase, std::memory_order_relaxed);
+}
+
+void DX11Hook_SetShowerValue(float value)
+{
+  value = std::clamp(value, 0.0f, 100.0f);
+  g_showerValue.store(value, std::memory_order_relaxed);
 }

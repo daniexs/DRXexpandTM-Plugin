@@ -47,4 +47,9 @@ add_custom_command(TARGET DRXexpandTM POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
     "$<TARGET_FILE_DIR:DRXexpandTM>/shaders"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    "$<TARGET_FILE_DIR:DRXexpandTM>/assets"
 )
+
+target_link_libraries(DRXexpandTM PRIVATE winmm)

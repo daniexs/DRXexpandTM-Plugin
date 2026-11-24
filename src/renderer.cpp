@@ -431,7 +431,8 @@ void Renderer_Render(
     float intensity,
     float blurAmount,
     float shakeAmount,
-    float shakePhase)
+    float shakePhase,
+    float showerValue)
 {
   if (!swapChain)
     return;
@@ -449,8 +450,12 @@ void Renderer_Render(
   shakeAmount = (shakeAmount < 0.0f)
                     ? 0.0f
                     : (shakeAmount > 1.0f ? 1.0f : shakeAmount);
+  showerValue = (showerValue < 0.0f)
+                    ? 0.0f
+                    : (showerValue > 100.0f ? 100.0f : showerValue);
 
-  if (intensity <= 0.001f && blurAmount <= 0.001f && shakeAmount <= 0.001f)
+  if (intensity <= 0.001f && blurAmount <= 0.001f && shakeAmount <= 0.001f &&
+      showerValue > 20.0f)
     return;
 
   std::lock_guard<std::mutex> lock(g_rendererMutex);
@@ -527,8 +532,8 @@ void Renderer_Render(
     float blurAmount;
     float shakeAmount;
     float shakePhase;
-    float padding0;
-    float padding1;
+    float showerValue;
+    float timeSeconds;
   };
 
   EffectParams params{};
@@ -541,6 +546,8 @@ void Renderer_Render(
   params.blurAmount = blurAmount;
   params.shakeAmount = shakeAmount;
   params.shakePhase = shakePhase;
+  params.showerValue = showerValue;
+  params.timeSeconds = static_cast<float>(GetTickCount64()) / 1000.0f;
 
   deferred->UpdateSubresource(
       g_renderer.constantBuffer,

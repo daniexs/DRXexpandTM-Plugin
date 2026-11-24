@@ -10,6 +10,7 @@ void Renderer_Render(
     float intensity,
     float blurAmount,
     float shakeAmount,
-    float shakePhase);
+    float shakePhase,
+    float showerValue);
 
 void Renderer_Release();

@@ -3,10 +3,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <mmsystem.h>
 #include <cstdio>
 #include <cmath>
 #include <atomic>
 #include <algorithm>
+#include <cwchar>
 #include "scssdk_telemetry.h"
 #include "dx11_hook.h"
 
@@ -23,7 +25,7 @@ static std::atomic<float> g_vignetteTarget{0.0f};
 
 struct DriverNeeds
 {
-    float rest, lapar, haus, health, toilet;
+    float rest, lapar, haus, health, toilet, shower;
 };
 
 // ============================================================
@@ -33,6 +35,7 @@ struct DriverNeeds
 static constexpr DWORD TELEMETRY_INTERVAL = 5000;
 static constexpr DWORD WORKER_INTERVAL = 50;
 static constexpr ULONGLONG REST_RECOVERY_DRAIN_DELAY = 10000;
+static constexpr float FLY_EFFECT_THRESHOLD = 4.0f;
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
 static constexpr ULONGLONG VIGNETTE_FADE_DURATION = 600;
@@ -450,12 +453,13 @@ static bool ReadNeeds(DriverNeeds &out)
         snprintf(
             buf,
             sizeof(buf),
-            "DRXexpandTM RAW: rest=%.2f hunger=%.2f thirst=%.2f health=%.2f toilet=%.2f",
+            "DRXexpandTM RAW: rest=%.2f hunger=%.2f thirst=%.2f health=%.2f toilet=%.2f shower=%.2f",
             out.rest,
             out.lapar,
             out.haus,
             out.health,
-            out.toilet);
+            out.toilet,
+            out.shower);
 
         g_log(SCS_LOG_TYPE_message, buf);
     }
@@ -464,7 +468,8 @@ static bool ReadNeeds(DriverNeeds &out)
            std::isfinite(out.lapar) &&
            std::isfinite(out.haus) &&
            std::isfinite(out.health) &&
-           std::isfinite(out.toilet);
+           std::isfinite(out.toilet) &&
+           std::isfinite(out.shower);
 }
 
 static bool InRange(float v)
@@ -478,7 +483,8 @@ static bool LooksInitialized(const DriverNeeds &n)
            InRange(n.lapar) &&
            InRange(n.haus) &&
            InRange(n.health) &&
-           InRange(n.toilet);
+           InRange(n.toilet) &&
+           InRange(n.shower);
 }
 
 static void ApplyHealthDrain(float drainPerSecond, float elapsedSeconds)
@@ -513,6 +519,95 @@ static void ApplyHealthDrain(float drainPerSecond, float elapsedSeconds)
     }
 }
 
+static int g_pluginModuleAnchor = 0;
+static bool g_flyAudioOpened = false;
+static bool g_flyAudioErrorLogged = false;
+
+static bool EnsureFlyAudioOpen()
+{
+    if (g_flyAudioOpened)
+        return true;
+
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&g_pluginModuleAnchor),
+            &module))
+    {
+        return false;
+    }
+
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return false;
+
+    wchar_t *separator = wcsrchr(path, L'\\');
+    if (!separator)
+        return false;
+    *(separator + 1) = L'\0';
+
+    if (wcscat_s(path, MAX_PATH, L"assets\\fly.mp3") != 0)
+        return false;
+
+    wchar_t command[MAX_PATH + 96]{};
+    if (swprintf_s(
+            command,
+            L"open \"%s\" type mpegvideo alias DRXexpandTMFly",
+            path) < 0)
+    {
+        return false;
+    }
+
+    if (mciSendStringW(command, nullptr, 0, nullptr) != 0)
+    {
+        if (!g_flyAudioErrorLogged && g_log)
+        {
+            g_log(SCS_LOG_TYPE_error, "DRXexpandTM: FAILED TO OPEN assets/fly.mp3");
+            g_flyAudioErrorLogged = true;
+        }
+        return false;
+    }
+
+    g_flyAudioOpened = true;
+    return true;
+}
+
+static bool PlayFlyAudio()
+{
+    if (!EnsureFlyAudioOpen())
+        return false;
+
+    mciSendStringW(L"seek DRXexpandTMFly to start", nullptr, 0, nullptr);
+    if (mciSendStringW(L"play DRXexpandTMFly repeat", nullptr, 0, nullptr) != 0)
+    {
+        if (!g_flyAudioErrorLogged && g_log)
+        {
+            g_log(SCS_LOG_TYPE_error, "DRXexpandTM: FAILED TO PLAY fly audio");
+            g_flyAudioErrorLogged = true;
+        }
+        return false;
+    }
+    return true;
+}
+
+static void StopFlyAudio()
+{
+    if (g_flyAudioOpened)
+        mciSendStringW(L"stop DRXexpandTMFly", nullptr, 0, nullptr);
+}
+
+static void CloseFlyAudio()
+{
+    if (g_flyAudioOpened)
+    {
+        mciSendStringW(L"stop DRXexpandTMFly", nullptr, 0, nullptr);
+        mciSendStringW(L"close DRXexpandTMFly", nullptr, 0, nullptr);
+        g_flyAudioOpened = false;
+    }
+}
+
 // ============================================================
 // WORKER
 // ============================================================
@@ -534,6 +629,9 @@ static DWORD WINAPI Worker(LPVOID)
     float previousRest = 0.0f;
     float hungerForDrain = 100.0f;
     float thirstForDrain = 100.0f;
+    float showerForEffects = 100.0f;
+    bool flyAudioPlaying = false;
+    bool flyAudioAttempted = false;
 
     while (g_run.load())
     {
@@ -550,6 +648,7 @@ static DWORD WINAPI Worker(LPVOID)
             restBaselineReady = false;
             hungerForDrain = 100.0f;
             thirstForDrain = 100.0f;
+            showerForEffects = 100.0f;
         }
 
         // Jangan memproses kebutuhan ketika game pause.
@@ -567,6 +666,12 @@ static DWORD WINAPI Worker(LPVOID)
             restBaselineReady = false;
 
             ResetTriggerState();
+            if (flyAudioPlaying)
+                StopFlyAudio();
+            flyAudioPlaying = false;
+            flyAudioAttempted = false;
+            showerForEffects = 100.0f;
+            DX11Hook_SetShowerValue(100.0f);
             UpdateVignette();
             UpdateToiletShake();
 
@@ -605,6 +710,7 @@ static DWORD WINAPI Worker(LPVOID)
                 restBaselineReady = false;
 
                 ResetTriggerState();
+                showerForEffects = 100.0f;
             }
             else
             {
@@ -648,6 +754,8 @@ static DWORD WINAPI Worker(LPVOID)
 
                     hungerForDrain = n.lapar;
                     thirstForDrain = n.haus;
+                    showerForEffects = n.shower;
+                    DX11Hook_SetShowerValue(n.shower);
 
                     // Satu pengendali untuk hunger dan thirst.
                     // Nilai terendah menjadi prioritas.
@@ -681,6 +789,24 @@ static DWORD WINAPI Worker(LPVOID)
         // Ini menjaga durasi pulse tetap akurat.
         UpdateVignette();
         UpdateToiletShake();
+        if (!ready)
+            DX11Hook_SetShowerValue(100.0f);
+
+        if (ready && showerForEffects < FLY_EFFECT_THRESHOLD)
+        {
+            if (!flyAudioAttempted)
+            {
+                flyAudioAttempted = true;
+                flyAudioPlaying = PlayFlyAudio();
+            }
+        }
+        else
+        {
+            if (flyAudioPlaying)
+                StopFlyAudio();
+            flyAudioPlaying = false;
+            flyAudioAttempted = false;
+        }
 
         if (ready)
         {
@@ -869,6 +995,7 @@ SCSAPI_VOID scs_telemetry_shutdown(void)
     }
 
     DX11Hook_Shutdown();
+    CloseFlyAudio();
 
     if (g_stopEvent)
     {
