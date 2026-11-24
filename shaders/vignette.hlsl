@@ -125,8 +125,8 @@ float4 PSMain(VSOutput input) : SV_TARGET
     {
         float t = saturate((20.0 - showerValue) / 20.0);
         float luminance = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
-        color.rgb = lerp(color.rgb, luminance.xxx, 0.50 * t);
-        color.rgb = lerp(color.rgb, color.rgb * float3(1.035, 0.97, 0.88), 0.30 * t);
+        color.rgb = lerp(color.rgb, luminance.xxx, 0.40 * t);
+        color.rgb = lerp(color.rgb, color.rgb * float3(1.035, 0.97, 0.88), 0.24 * t);
 
         float2 centerDistance = abs(input.uv - float2(0.5, 0.5));
         float edgeOutside = max(centerDistance.x - 0.35, centerDistance.y - 0.35);
@@ -134,7 +134,7 @@ float4 PSMain(VSOutput input) : SV_TARGET
                          (1.0 - smoothstep(0.12, 0.18, edgeOutside));
         float grimeNoise = Noise21(input.uv * float2(27.0, 19.0) + timeSeconds * 0.012);
         float blotches = smoothstep(0.42, 0.82, grimeNoise);
-        float grime = edgeBand * (0.16 + 0.64 * blotches) * t;
+        float grime = edgeBand * (0.14 + 0.54 * blotches) * t;
         color.rgb = lerp(color.rgb, float3(0.19, 0.15, 0.105), grime);
     }
 

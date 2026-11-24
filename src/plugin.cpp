@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cwchar>
 #include "scssdk_telemetry.h"
+#include "common/scssdk_telemetry_common_channels.h"
 #include "dx11_hook.h"
 #include "resource_ids.h"
 
@@ -35,8 +36,12 @@ struct DriverNeeds
 
 static constexpr DWORD TELEMETRY_INTERVAL = 5000;
 static constexpr DWORD WORKER_INTERVAL = 50;
-static constexpr ULONGLONG REST_RECOVERY_DRAIN_DELAY = 20000;
+static constexpr ULONGLONG GAME_TIME_SKIP_DRAIN_DELAY = 20000;
+static constexpr scs_u32_t GAME_TIME_SKIP_THRESHOLD_MINUTES = 25;
 static constexpr float FLY_EFFECT_THRESHOLD = 4.0f;
+
+static std::atomic<scs_u32_t> g_gameTimeMinutes{0};
+static std::atomic_bool g_gameTimeReady{false};
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
 static constexpr ULONGLONG VIGNETTE_FADE_DURATION = 600;
@@ -688,8 +693,9 @@ static DWORD WINAPI Worker(LPVOID)
     ULONGLONG nextTelemetryRead = 0;
     ULONGLONG lastHealthDrainTime = 0;
     ULONGLONG healthDrainResumeTime = 0;
-    bool restBaselineReady = false;
-    float previousRest = 0.0f;
+    bool healthDrainDelayPending = false;
+    bool gameTimeBaselineReady = false;
+    scs_u32_t previousGameTime = 0;
     float hungerForDrain = 100.0f;
     float thirstForDrain = 100.0f;
     float showerForEffects = 100.0f;
@@ -707,11 +713,48 @@ static DWORD WINAPI Worker(LPVOID)
             ready = false;
             nextTelemetryRead = 0;
             lastHealthDrainTime = 0;
-            healthDrainResumeTime = 0;
-            restBaselineReady = false;
             hungerForDrain = 100.0f;
             thirstForDrain = 100.0f;
             showerForEffects = 100.0f;
+        }
+
+        // A backwards game clock means a save was loaded; rebase without a delay.
+        if (g_gameTimeReady.load(std::memory_order_acquire))
+        {
+            const scs_u32_t gameTime =
+                g_gameTimeMinutes.load(std::memory_order_relaxed);
+
+            if (!gameTimeBaselineReady)
+            {
+                previousGameTime = gameTime;
+                gameTimeBaselineReady = true;
+            }
+            else if (gameTime < previousGameTime)
+            {
+                previousGameTime = gameTime;
+                healthDrainDelayPending = false;
+                healthDrainResumeTime = 0;
+                if (g_log)
+                    g_log(
+                        SCS_LOG_TYPE_message,
+                        "DRXexpandTM: GAME TIME MOVED BACKWARD - BASELINE RESET");
+            }
+            else
+            {
+                const scs_u32_t elapsedGameMinutes = gameTime - previousGameTime;
+                previousGameTime = gameTime;
+
+                if (elapsedGameMinutes > GAME_TIME_SKIP_THRESHOLD_MINUTES)
+                {
+                    healthDrainDelayPending = true;
+                    lastHealthDrainTime = 0;
+
+                    if (g_log)
+                        g_log(
+                            SCS_LOG_TYPE_message,
+                            "DRXexpandTM: GAME TIME SKIP OVER 25 MINUTES - HEALTH DRAIN DELAYED 20 SECONDS");
+                }
+            }
         }
 
         // Jangan memproses kebutuhan ketika game pause.
@@ -725,8 +768,6 @@ static DWORD WINAPI Worker(LPVOID)
             ready = false;
             stableCount = 0;
             lastHealthDrainTime = 0;
-            healthDrainResumeTime = 0;
-            restBaselineReady = false;
 
             ResetTriggerState();
             if (flyAudioPlaying)
@@ -743,6 +784,15 @@ static DWORD WINAPI Worker(LPVOID)
                 WORKER_INTERVAL);
 
             continue;
+        }
+
+        // Start the grace period after waking, even if the time jump arrived while paused.
+        if (healthDrainDelayPending)
+        {
+            healthDrainResumeTime =
+                GetTickCount64() + GAME_TIME_SKIP_DRAIN_DELAY;
+            healthDrainDelayPending = false;
+            lastHealthDrainTime = 0;
         }
 
         const ULONGLONG now = GetTickCount64();
@@ -769,8 +819,6 @@ static DWORD WINAPI Worker(LPVOID)
                 ready = false;
                 stableCount = 0;
                 lastHealthDrainTime = 0;
-                healthDrainResumeTime = 0;
-                restBaselineReady = false;
 
                 ResetTriggerState();
                 showerForEffects = 100.0f;
@@ -794,27 +842,6 @@ static DWORD WINAPI Worker(LPVOID)
 
                 if (ready)
                 {
-                    const ULONGLONG restSampleTime = GetTickCount64();
-                    if (!restBaselineReady)
-                    {
-                        previousRest = n.rest;
-                        restBaselineReady = true;
-                    }
-                    else if ((n.lapar <= 0.0f || n.haus <= 0.0f) &&
-                             n.rest > previousRest + 4.0f &&
-                             restSampleTime >= healthDrainResumeTime)
-                    {
-                        healthDrainResumeTime =
-                            restSampleTime + REST_RECOVERY_DRAIN_DELAY;
-                        lastHealthDrainTime = 0;
-
-                        if (g_log)
-                            g_log(
-                                SCS_LOG_TYPE_message,
-                                "DRXexpandTM: REST RECOVERY - HEALTH DRAIN DELAYED 20 SECONDS");
-                    }
-                    previousRest = n.rest;
-
                     hungerForDrain = n.lapar;
                     thirstForDrain = n.haus;
                     showerForEffects = n.shower;
@@ -876,7 +903,7 @@ static DWORD WINAPI Worker(LPVOID)
             const ULONGLONG nowForDrain = GetTickCount64();
             if (nowForDrain < healthDrainResumeTime)
             {
-                // Do not accumulate drain time during the post-rest grace period.
+                // Do not accumulate drain time during the post-timeskip grace period.
                 lastHealthDrainTime = nowForDrain;
             }
             else if (lastHealthDrainTime == 0)
@@ -913,6 +940,19 @@ static DWORD WINAPI Worker(LPVOID)
 // ============================================================
 // SCS EVENTS
 // ============================================================
+
+static void SCSAPIFUNC OnGameTime(
+    const scs_string_t name,
+    const scs_u32_t index,
+    const scs_value_t *const value,
+    const scs_context_t context)
+{
+    if (!value || value->type != SCS_VALUE_TYPE_u32)
+        return;
+
+    g_gameTimeMinutes.store(value->value_u32.value, std::memory_order_relaxed);
+    g_gameTimeReady.store(true, std::memory_order_release);
+}
 
 static void SCSAPIFUNC OnPaused(
     const scs_event_t event,
@@ -974,6 +1014,20 @@ SCSAPI_RESULT scs_telemetry_init(
         SCS_TELEMETRY_EVENT_started,
         OnStarted,
         nullptr);
+
+    g_gameTimeMinutes.store(0, std::memory_order_relaxed);
+    g_gameTimeReady.store(false, std::memory_order_relaxed);
+    const scs_result_t gameTimeRegistration = p->register_for_channel(
+        SCS_TELEMETRY_CHANNEL_game_time,
+        SCS_U32_NIL,
+        SCS_VALUE_TYPE_u32,
+        SCS_TELEMETRY_CHANNEL_FLAG_none,
+        OnGameTime,
+        nullptr);
+    if (gameTimeRegistration != SCS_RESULT_ok && g_log)
+        g_log(
+            SCS_LOG_TYPE_error,
+            "DRXexpandTM: FAILED TO REGISTER GAME TIME CHANNEL");
 
     g_run = true;
     g_paused = true;
