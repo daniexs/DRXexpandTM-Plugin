@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "renderer.h"
+#include "resource_ids.h"
 #include <atomic>
 
 #pragma comment(lib, "d3d11.lib")
@@ -114,7 +115,10 @@ static void ReleaseResourcesUnlocked()
   g_renderer.ready = false;
 }
 
-static bool GetShaderPath(wchar_t *path, DWORD capacity)
+static bool GetResourceData(
+    int resourceId,
+    const void **data,
+    DWORD *size)
 {
   HMODULE module = nullptr;
 
@@ -127,39 +131,37 @@ static bool GetShaderPath(wchar_t *path, DWORD capacity)
     return false;
   }
 
-  DWORD length = GetModuleFileNameW(
+  HRSRC resource = FindResourceW(
       module,
-      path,
-      capacity);
-
-  if (length == 0 || length >= capacity)
+      MAKEINTRESOURCEW(resourceId),
+      MAKEINTRESOURCEW(10));
+  if (!resource)
     return false;
 
-  wchar_t *separator = wcsrchr(path, L'\\');
-
-  if (!separator)
+  HGLOBAL loaded = LoadResource(module, resource);
+  if (!loaded)
     return false;
 
-  *(separator + 1) = L'\0';
-
-  return wcscat_s(
-             path,
-             capacity,
-             L"shaders\\vignette.hlsl") == 0;
+  *size = SizeofResource(module, resource);
+  *data = LockResource(loaded);
+  return *data != nullptr && *size > 0;
 }
 
 static bool CompileShader(
-    const wchar_t *path,
+    const void *source,
+    SIZE_T sourceSize,
     const char *entry,
     const char *target,
     ID3DBlob **output)
 {
   ID3DBlob *errors = nullptr;
 
-  HRESULT hr = D3DCompileFromFile(
-      path,
+  HRESULT hr = D3DCompile(
+      source,
+      sourceSize,
+      "vignette.hlsl",
       nullptr,
-      D3D_COMPILE_STANDARD_FILE_INCLUDE,
+      nullptr,
       entry,
       target,
       D3DCOMPILE_ENABLE_STRICTNESS,
@@ -202,9 +204,9 @@ static bool CompileShader(
 
 static bool CreateShaders(ID3D11Device *device)
 {
-  wchar_t shaderPath[MAX_PATH]{};
-
-  if (!GetShaderPath(shaderPath, MAX_PATH))
+  const void *shaderData = nullptr;
+  DWORD shaderSize = 0;
+  if (!GetResourceData(IDR_DRX_VIGNETTE_HLSL, &shaderData, &shaderSize))
     return false;
 
   ID3DBlob *vsBlob = nullptr;
@@ -213,7 +215,8 @@ static bool CreateShaders(ID3D11Device *device)
   bool success = false;
 
   if (!CompileShader(
-          shaderPath,
+          shaderData,
+          shaderSize,
           "VSMain",
           "vs_5_0",
           &vsBlob))
@@ -222,7 +225,8 @@ static bool CreateShaders(ID3D11Device *device)
   }
 
   if (!CompileShader(
-          shaderPath,
+          shaderData,
+          shaderSize,
           "PSMain",
           "ps_5_0",
           &psBlob))

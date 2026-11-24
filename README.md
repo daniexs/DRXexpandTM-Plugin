@@ -7,7 +7,7 @@ DRXexpandTM is a 64-bit DirectX 11 visual-effects plugin for Euro Truck Simulato
 - Shower values at or below 20% gradually desaturate the image and add subtle sweaty grime around the edges. Below 4%, three animated flies appear and `assets/fly.mp3` loops while the effect is active.
 - When hunger reaches 0%, health decreases by 0.5 points per second. When thirst reaches 0%, health decreases by 1 point per second. If both are at 0%, the rates combine to 1.5 points per second.
 
-Telemetry values are sampled every five seconds. Visual effects are rendered through a DirectX 11 `Present` hook. The `shaders` and `assets` folders must remain beside the plugin DLL.
+Telemetry values are sampled every five seconds. Visual effects are rendered through a DirectX 11 `Present` hook. The shader and fly audio are embedded in the DLL; the MP3 is extracted to a temporary file on first use and removed at shutdown.
 
 ## Compatibility disclaimer
 
@@ -15,7 +15,7 @@ Telemetry values are sampled every five seconds. Visual effects are rendered thr
 
 ## Installation
 
-1. Build the project as **x64 Release**. The build output contains `DRXexpandTM.dll`, a `shaders` folder, and an `assets` folder.
+1. Build the project as **x64 Release**. The build output contains `DRXexpandTM.dll` with the shader and fly audio embedded.
 2. Open the ETS2 installation directory. For a typical Steam installation, this is:
 
    ```text
@@ -23,20 +23,17 @@ Telemetry values are sampled every five seconds. Visual effects are rendered thr
    ```
 
 3. Create the `plugins` folder there if it does not already exist.
-4. Copy `DRXexpandTM.dll` into `bin/win_x64/plugins/`.
-5. Copy the complete `shaders` and `assets` folders beside the DLL, so the final layout is:
+4. Copy `DRXexpandTM.dll` into `bin/win_x64/plugins/`. No separate shader or asset folders are needed.
+
+The final layout is:
 
    ```text
    Euro Truck Simulator 2/
    └── bin/win_x64/
        └── plugins/
-           ├── DRXexpandTM.dll
-           ├── assets/
-           │   └── fly.mp3
-           └── shaders/
-               └── vignette.hlsl
+           └── DRXexpandTM.dll
    ```
 
 6. Ensure TMRealWalk v1.00 Beta 5.2 is installed and enabled, then start ETS2.
 
-To uninstall, close ETS2 and remove `DRXexpandTM.dll`, `plugins/shaders/vignette.hlsl`, and `plugins/assets/fly.mp3`. If other plugins use either folder, remove only these plugin files and leave other files in place.
+To uninstall, close ETS2 and remove `DRXexpandTM.dll` from the plugins folder.

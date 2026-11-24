@@ -39,9 +39,9 @@ float Noise21(float2 p)
     return lerp(lerp(a, b, local.x), lerp(c, d, local.x), local.y);
 }
 
-float Ellipse(float2 point, float2 radii)
+float Ellipse(float2 samplePosition, float2 radii)
 {
-    float distance = length(point / radii);
+    float distance = length(samplePosition / radii);
     return 1.0 - smoothstep(0.72, 1.12, distance);
 }
 
@@ -49,13 +49,13 @@ void FlyShape(float2 uv, float2 position, float2 resolution, float seed,
               out float body, out float wings)
 {
     float2 pixelDelta = (uv - position) * resolution;
-    body = Ellipse(pixelDelta, float2(1.6, 1.1));
+    body = Ellipse(pixelDelta, float2(3.2, 2.2));
 
     float flutter = 0.5 + 0.5 * sin(timeSeconds * 145.0 + seed);
-    float wingWidth = 2.1;
-    float wingHeight = 0.9 + flutter * 0.35;
-    float leftWing = Ellipse(pixelDelta - float2(-1.8, -0.8), float2(wingWidth, wingHeight));
-    float rightWing = Ellipse(pixelDelta - float2(1.8, -0.8), float2(wingWidth, wingHeight));
+    float wingWidth = 3.6;
+    float wingHeight = 1.6 + flutter * 0.6;
+    float leftWing = Ellipse(pixelDelta - float2(-3.2, -1.4), float2(wingWidth, wingHeight));
+    float rightWing = Ellipse(pixelDelta - float2(3.2, -1.4), float2(wingWidth, wingHeight));
     wings = max(leftWing, rightWing) * (0.12 + 0.22 * flutter);
 }
 
@@ -125,8 +125,8 @@ float4 PSMain(VSOutput input) : SV_TARGET
     {
         float t = saturate((20.0 - showerValue) / 20.0);
         float luminance = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
-        color.rgb = lerp(color.rgb, luminance.xxx, 0.30 * t);
-        color.rgb = lerp(color.rgb, color.rgb * float3(1.035, 0.97, 0.88), 0.18 * t);
+        color.rgb = lerp(color.rgb, luminance.xxx, 0.50 * t);
+        color.rgb = lerp(color.rgb, color.rgb * float3(1.035, 0.97, 0.88), 0.30 * t);
 
         float2 centerDistance = abs(input.uv - float2(0.5, 0.5));
         float edgeOutside = max(centerDistance.x - 0.35, centerDistance.y - 0.35);
@@ -134,7 +134,7 @@ float4 PSMain(VSOutput input) : SV_TARGET
                          (1.0 - smoothstep(0.12, 0.18, edgeOutside));
         float grimeNoise = Noise21(input.uv * float2(27.0, 19.0) + timeSeconds * 0.012);
         float blotches = smoothstep(0.42, 0.82, grimeNoise);
-        float grime = edgeBand * (0.035 + 0.16 * blotches) * t;
+        float grime = edgeBand * (0.16 + 0.64 * blotches) * t;
         color.rgb = lerp(color.rgb, float3(0.19, 0.15, 0.105), grime);
     }
 

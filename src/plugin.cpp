@@ -11,6 +11,7 @@
 #include <cwchar>
 #include "scssdk_telemetry.h"
 #include "dx11_hook.h"
+#include "resource_ids.h"
 
 static scs_log_t g_log = nullptr;
 static HANDLE g_thread = nullptr;
@@ -34,7 +35,7 @@ struct DriverNeeds
 
 static constexpr DWORD TELEMETRY_INTERVAL = 5000;
 static constexpr DWORD WORKER_INTERVAL = 50;
-static constexpr ULONGLONG REST_RECOVERY_DRAIN_DELAY = 10000;
+static constexpr ULONGLONG REST_RECOVERY_DRAIN_DELAY = 20000;
 static constexpr float FLY_EFFECT_THRESHOLD = 4.0f;
 
 static constexpr ULONGLONG VIGNETTE_DURATION = 5000;
@@ -522,43 +523,98 @@ static void ApplyHealthDrain(float drainPerSecond, float elapsedSeconds)
 static int g_pluginModuleAnchor = 0;
 static bool g_flyAudioOpened = false;
 static bool g_flyAudioErrorLogged = false;
+static wchar_t g_flyAudioDirectory[MAX_PATH]{};
+static wchar_t g_flyAudioPath[MAX_PATH]{};
 
 static bool EnsureFlyAudioOpen()
 {
     if (g_flyAudioOpened)
         return true;
 
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&g_pluginModuleAnchor),
-            &module))
+    if (g_flyAudioPath[0] == L'\0')
     {
-        return false;
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&g_pluginModuleAnchor),
+                &module))
+            return false;
+
+        HRSRC resource = FindResourceW(
+            module,
+            MAKEINTRESOURCEW(IDR_DRX_FLY_MP3),
+            MAKEINTRESOURCEW(10));
+        if (!resource)
+            return false;
+
+        HGLOBAL loaded = LoadResource(module, resource);
+        const DWORD resourceSize = SizeofResource(module, resource);
+        const void *resourceData = loaded ? LockResource(loaded) : nullptr;
+        if (!resourceData || resourceSize == 0)
+            return false;
+
+        const DWORD tempPathLength = GetTempPathW(
+            ARRAYSIZE(g_flyAudioDirectory),
+            g_flyAudioDirectory);
+        if (tempPathLength == 0 || tempPathLength >= ARRAYSIZE(g_flyAudioDirectory))
+            return false;
+
+        wchar_t directoryName[64]{};
+        if (swprintf_s(
+                directoryName,
+                L"DRXexpandTM-%lu",
+                GetCurrentProcessId()) < 0)
+            return false;
+
+        // Rebuild the path from the base returned by GetTempPathW.
+        g_flyAudioDirectory[tempPathLength] = L'\0';
+        if (wcscat_s(g_flyAudioDirectory, ARRAYSIZE(g_flyAudioDirectory), directoryName) != 0 ||
+            wcscat_s(g_flyAudioDirectory, ARRAYSIZE(g_flyAudioDirectory), L"\\") != 0)
+            return false;
+
+        if (!CreateDirectoryW(g_flyAudioDirectory, nullptr) &&
+            GetLastError() != ERROR_ALREADY_EXISTS)
+            return false;
+
+        if (wcscpy_s(g_flyAudioPath, ARRAYSIZE(g_flyAudioPath), g_flyAudioDirectory) != 0 ||
+            wcscat_s(g_flyAudioPath, ARRAYSIZE(g_flyAudioPath), L"fly.mp3") != 0)
+            return false;
+
+        HANDLE file = CreateFileW(
+            g_flyAudioPath,
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_TEMPORARY,
+            nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD bytesWritten = 0;
+        const BOOL writeSucceeded = WriteFile(
+            file,
+            resourceData,
+            resourceSize,
+            &bytesWritten,
+            nullptr);
+        CloseHandle(file);
+        if (!writeSucceeded || bytesWritten != resourceSize)
+        {
+            DeleteFileW(g_flyAudioPath);
+            RemoveDirectoryW(g_flyAudioDirectory);
+            g_flyAudioPath[0] = L'\0';
+            return false;
+        }
     }
-
-    wchar_t path[MAX_PATH]{};
-    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return false;
-
-    wchar_t *separator = wcsrchr(path, L'\\');
-    if (!separator)
-        return false;
-    *(separator + 1) = L'\0';
-
-    if (wcscat_s(path, MAX_PATH, L"assets\\fly.mp3") != 0)
-        return false;
 
     wchar_t command[MAX_PATH + 96]{};
     if (swprintf_s(
             command,
             L"open \"%s\" type mpegvideo alias DRXexpandTMFly",
-            path) < 0)
-    {
+            g_flyAudioPath) < 0)
         return false;
-    }
 
     if (mciSendStringW(command, nullptr, 0, nullptr) != 0)
     {
@@ -605,6 +661,13 @@ static void CloseFlyAudio()
         mciSendStringW(L"stop DRXexpandTMFly", nullptr, 0, nullptr);
         mciSendStringW(L"close DRXexpandTMFly", nullptr, 0, nullptr);
         g_flyAudioOpened = false;
+    }
+    if (g_flyAudioPath[0] != L'\0')
+    {
+        DeleteFileW(g_flyAudioPath);
+        RemoveDirectoryW(g_flyAudioDirectory);
+        g_flyAudioPath[0] = L'\0';
+        g_flyAudioDirectory[0] = L'\0';
     }
 }
 
@@ -748,7 +811,7 @@ static DWORD WINAPI Worker(LPVOID)
                         if (g_log)
                             g_log(
                                 SCS_LOG_TYPE_message,
-                                "DRXexpandTM: REST RECOVERY - HEALTH DRAIN DELAYED 10 SECONDS");
+                                "DRXexpandTM: REST RECOVERY - HEALTH DRAIN DELAYED 20 SECONDS");
                     }
                     previousRest = n.rest;
 
